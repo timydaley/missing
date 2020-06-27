@@ -1,0 +1,190 @@
+---
+title: ""
+author: "Timothy Daley"
+date: "5/25/2020"
+output: html_document
+---
+
+TLDR: Estimating the number of missing genes is hard.
+
+There's a huge debate going on right now about whether single cell data is zero-inflated or not.  I'm going to add some of the lessons I learned over the course of my PhD in missing species/class problems.  Estimating the number of missing species is hard.  While models may seem close on the truncated, non-zero counts, the inferred number of missing zeros will be very far apart.  Therefore, while it may seem that there is little difference between models with close fits, in practice that is not the case since a lot of downstream analyses depend heavily on good estimation of the the number of missing zeros.  
+
+First I'll illustrate the underlying issue with some simple examples.  
+
+Let's compare two cases: 
+1. Zero-Inflated Negative Binomial
+2. Zero-Inflated log-Normal-Poisson
+
+```{r, cache = TRUE}
+set.seed(123)
+n_genes = 20000
+frac_missing = 0.75
+dropout_indicator = rbinom(n_genes, size = 1, prob = frac_missing)
+# using the fact that negative binomial is the same as Gamma-Poisson
+m = 0.1
+v = 5
+lambdas = (1 - dropout_indicator)*m*rgamma(n_genes, shape = 1/v, scale = v)
+zinb_counts = rpois(n_genes, lambda = lambdas)
+print(paste0("fraction zero: ", sum(zinb_counts == 0)/n_genes))
+print(paste0("fraction dropped out: ", sum(dropout_indicator)/n_genes))
+hist(zinb_counts, col = "grey", main = "histogram of zinb counts", breaks = seq(from = 0, to = max(zinb_counts), by = 1))
+hist(zinb_counts[zinb_counts > 0], col = "grey", main = "histogram of zero-truncation neg-binom counts",  breaks = seq(from = 0, to = max(zinb_counts), by = 1))
+```
+
+For comparison here's zero-inflated log-normal Poisson counts.  If we want to match the mean and variance above we note that the mean and variance of a log-normal random variable are $\text{exp}(\mu + \sigma^2/2)$ and $(\text{exp}(\sigma^2) - 1) \text{exp}(2 \mu + \sigma^2)$.  Since the mean is 1, $\mu = -\sigma^2/2$. 
+```{r, cache = TRUE}
+v = 5 # variance from above
+sigma = sqrt(log(v + 1))
+lambdas = m*exp(rnorm(n_genes, mean = -sigma^2/2, sd = sigma))
+lambdas = (1 - dropout_indicator)*lambdas
+zilnp_counts = rpois(n_genes, lambda = lambdas)
+print(paste0("fraction zero: ", sum(zilnp_counts == 0)/n_genes))
+print(paste0("fraction dropped out: ", sum(dropout_indicator)/n_genes))
+hist(zilnp_counts, col = "grey", main = "histogram of zilnp counts", breaks = seq(from = 0, to = max(zilnp_counts), by = 1))
+hist(zilnp_counts[zilnp_counts > 0], col = "grey", main = "histogram of zero-truncation log-norm pois counts",  breaks = seq(from = 0, to = max(zilnp_counts), by = 1))
+```
+
+```{r, cache = TRUE}
+library(ggplot2)
+x = data.frame(counts = c(zinb_counts, zilnp_counts), model = rep(c("zinb", "zilnp"), each = n_genes))
+x = x[which(x$counts > 0), ]
+ggplot(x, aes(counts)) + geom_histogram(data = x[which(x$model == "zinb"), ], alpha = 0.5, col = "darkred", fill = "darkred") + geom_histogram(data = x[which(x$model == "zilnp"), ], alpha = 0.5, col = "dodgerblue", fill = "dodgerblue") + theme_bw()
+```
+
+Now, this matches the non-truncated mean and variances of the two distributions.  What if we match the truncated means and variances?
+
+We'll work with the Gamma-Poisson parametrization of the Negative Binomial distribution for simplicity with shape = $k$ and scale = $\theta$.  This has pmf 
+$$
+f_{\text{NB}}(x)= \int_{0}^{\infty} \frac{1}{\Gamma (k) \theta^{k}} \lambda^{k - 1} e^{-\lambda / \theta} \frac{1}{x!} \lambda^{x} e^{- \lambda} d \lambda = \frac{\Gamma(k + x)}{\Gamma(x + 1) \Gamma(k)} \theta^{x} (1 + \theta)^{-x - k}.
+$$
+The zero-truncated Negative Binomial distribution has pmf
+$$
+f_{\text{ZTNB}}(x) = \frac{1}{1 -  (1 + \theta)^{-k}} \frac{\Gamma(k + x)}{\Gamma(x + 1)  \Gamma(k)} \theta^{x} (1 + \theta)^{-x - k}.
+$$
+
+The log-Normal Poisson has pmf 
+$$
+f_{\text{LNP}} (x) = \int_{0}^{\infty} \frac{1}{\lambda \sqrt{2 \pi \sigma^{2}}} \text{exp} \bigg( - \frac{(\log \lambda - \mu)^2}{2 \sigma^2} \bigg) \frac{1}{x!} \lambda^{x} e^{- \lambda} d \lambda.
+$$
+As far as I know, there is no closed form to the above integral.  See, for example, On Fitting the Poisson Lognormal Distribution to Species-Abundance Data. This puts mass at zero equal to 
+$$
+f_{\text{LNP}} (0) = \int_{0}^{\infty} \frac{1}{\lambda \sqrt{2 \pi \sigma^{2}}} \text{exp} \bigg( - \frac{(\log \lambda - \mu)^2}{2 \sigma^2} \bigg) e^{-\lambda} d \lambda.
+$$
+Because of the complicated form of the above we won't write out the full pmf of the zero-truncated form.  We just note that it has the form 
+$$
+f_{\text{ZTLNP}}(x) = \frac{1}{1 - f_{\text{LNP}} (0)} f_{\text{LNP}}(0).
+$$
+This has not closed form either, so we'll do some approximate moment matching to compare the zero-truncated distributions.  We'll sample some negative binomial data, truncate the zeros, estimate the ZTLNP parameters, and finally sample LNP counts using the estimated parameters. 
+
+```{r, cache = TRUE}
+ztnb_counts = zinb_counts[which(zinb_counts > 0)]
+lnp_estimate = poilog::poilogMLE(ztnb_counts, zTrunc = TRUE)
+lnp_estimate
+```
+
+```{r, cache = TRUE}
+D = length(ztnb_counts)
+# horvitz-thompson estimator: N = D/(1 - Pr(0))
+N_lnp = D/(1 - poilog::dpoilog(0, mu = lnp_estimate$par['mu'], sig = lnp_estimate$par['sig']))
+N_lnp
+```
+
+```{r, cache = TRUE}
+ztlnp_counts = poilog::rpoilog(S = as.integer(N_lnp), mu = lnp_estimate$par['mu'], 
+                             sig = lnp_estimate$par['sig'])
+x = data.frame(counts = c(ztnb_counts, ztlnp_counts), 
+               model = c(rep("ztnb", times = length(ztnb_counts)),
+                         rep("ztlnp", times = length(ztlnp_counts))))
+ggplot(x, aes(counts)) + geom_histogram(data = x[which(x$model == "ztnb"), ], alpha = 0.5, col = "darkred", fill = "darkred") + geom_histogram(data = x[which(x$model == "ztlnp"), ], alpha = 0.5, col = "dodgerblue", fill = "dodgerblue") + theme_bw()
+```
+
+Let's look at difference between the number of non-zero genes between these two.
+
+```{r, cache = TRUE}
+N_lnp
+N_nb = sum(lambdas > 0)
+N_nb
+```
+
+The negative binomial estimate is nearly twice as much as the log-Normal-Poisson.  The issue is that any procedure that relies heavily on the total number of genes, usually as a normalization constant such as in differential expression analysis.  
+
+Now, let's take a look at how good model selection is here.  This is a proxy for the truth.  The parametric model (without good theoretical reason) is most often wrong, but even when it is wrong, the model selection has a profound impact on the estimated zero-inflation.  Let's look at how often model selection is right (out of only 2 choices), and what impact this has on the estimated zero-inlfation.
+
+```{r warning = FALSE, message = FALSE, cache = TRUE}
+n_sims = 200
+ztnb_sim_estimates = data.frame(ztnb_N = rep(0, times = n_sims), 
+                                ztlnp_N = rep(0, times = n_sims),
+                                ztnb_log_like = rep(0, times = n_sims),
+                                ztlnp_log_like = rep(0, times = n_sims))
+for(i in 1:n_sims){
+  n_genes = 5000
+  lambdas = m*rgamma(n_genes, shape = 1/v, scale = v)
+  nb_counts = rpois(n_genes, lambda = lambdas)
+  ztnb_counts = nb_counts[which(nb_counts > 0)]
+  poilogFit = poilog::poilogMLE(ztnb_counts)
+  ztnb_hist = data.frame(j = sort(unique(ztnb_counts), decreasing = FALSE), 
+                         n_j = sapply(sort(unique(ztnb_counts), decreasing = FALSE),
+                                      function(t) sum(ztnb_counts == t)))
+  ztnbfit = preseqR::preseqR.ztnb.em(ztnb_hist)
+  ztnb_sim_estimates$ztnb_log_like[i] = ztnbfit$loglik
+  ztnb_sim_estimates$ztlnp_log_like[i] = poilogFit$logLval
+  D = length(ztnb_counts)
+  ztnb_sim_estimates$ztnb_N[i] = as.integer(D/(1 - dnbinom(0, mu = ztnbfit$mu, size = ztnbfit$size)))
+  ztnb_sim_estimates$ztlnp_N[i] = as.integer(D/(1 - poilog::dpoilog(0, mu = poilogFit$par["mu"], sig = poilogFit$par["sig"])))
+}
+ztnb_sim_estimates = data.frame(ztnb_sim_estimates,
+                                N_diff = ztnb_sim_estimates$ztnb_N -
+                                  ztnb_sim_estimates$ztlnp_N,
+                                log_like_diff = ztnb_sim_estimates$ztnb_log_like -
+                                  ztnb_sim_estimates$ztlnp_log_like)
+head(ztnb_sim_estimates)
+```
+
+```{r, cache = TRUE}
+ggplot(ztnb_sim_estimates, aes(x = log_like_diff)) + geom_density() + theme_bw()
+ggplot(ztnb_sim_estimates, aes(x = N_diff)) + geom_density() + theme_bw()
+# fraction of model mis-selection
+sum(ztnb_sim_estimates$log_like_diff < 0)/n_sims
+```
+
+```{r, cache = TRUE}
+N = data.frame(N = c(ztnb_sim_estimates$ztnb_N, ztnb_sim_estimates$ztlnp_N),
+               model = rep(c("NB", "LNP"), each = dim(ztnb_sim_estimates)[1]))
+ggplot(N, aes(x = N, col = model, fill = model)) + geom_density(alpha = 0.6) + geom_vline(xintercept = n_genes, lty = 2) + scale_x_log10() + scale_color_brewer(palette = 'Set1') + theme_bw()
+```
+
+We see almost 20% of the time the wrong model is chosen.  We would think that with higher variance, but we don't see this is the case.  
+
+```{r cache = TRUE, warning = FALSE, message = FALSE}
+n_sims = 100
+m = 0.2
+var_param = 1:8
+model_sel = data.frame(var_param = var_param, 
+                       frac_correct = rep(0, times = length(var_param)))
+for(i in 1:length(var_param)){
+  n_correct = 0
+  v = var_param[i]
+  for(j in 1:n_sims){
+    n_genes = 5000
+    lambdas = m*rgamma(n_genes, shape = 1/v, scale = v)
+    nb_counts = rpois(n_genes, lambda = lambdas)
+    ztnb_counts = nb_counts[which(nb_counts > 0)]
+    poilogFit = poilog::poilogMLE(ztnb_counts)
+    ztnb_hist = data.frame(j = sort(unique(ztnb_counts), decreasing = FALSE), 
+                           n_j = sapply(sort(unique(ztnb_counts), decreasing = FALSE),
+                                        function(t) sum(ztnb_counts == t)))
+    ztnbfit = preseqR::preseqR.ztnb.em(ztnb_hist)
+    if(ztnbfit$loglik > poilogFit$logLval){
+      n_correct = n_correct + 1
+    }
+  }
+  model_sel$frac_correct[i] = n_correct/n_sims
+}
+model_sel
+ggplot(model_sel, aes(x = var_param, y = frac_correct)) + geom_line() + theme_bw() + ggtitle('% correct (NB) model selected')
+```
+
+Of course, in the real world it is a rare situation that we understand the underlying mechanisms well enough to correctly specify the parametric model.  For example, in our motivating example we would have to understand any bias that result from unequal capture probabilities of the mRNA (or DNA in applications such as scATAC-seq) or unequal amplification of the captured molecules.  I don't believe that this is the case, and any such understanding would most likely be technology dependent (e.g. 10X vs Fluidigm).   
+
+The next major question is then what practical impact does model misspecification have?  We'll look at one major application, differential expression.  We'll look at what happens when you get the model right and what happens when you get the model wrong.  We'll use the simulation framework of [Koen Van den Berge et al. 2018](https://genomebiology.biomedcentral.com/articles/10.1186/s13059-018-1406-4), available in the R package [zinbwaveZinger](https://github.com/statOmics/zinbwaveZinger).
+

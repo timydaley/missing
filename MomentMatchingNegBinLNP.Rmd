@@ -1,0 +1,61 @@
+---
+title: "Moment matching of Negative Binomial and log-Normal Poisson distributions"
+author: "Timothy Daley"
+date: "6/21/2020"
+output: html_document
+---
+
+We need to moment match the Negative Binomial (NB) and log-Normal Poisson distributions.  Given Negative Binomial data with mean $m$ and size parameter $k$, what $\mu$ and $\sigma$ parameters are necessary to produce log-Normal Poisson data with the same population mean and variance.  
+
+The pmf for the Negative Binomial is 
+$$
+f_{\text{NB}}(x) = \frac{\Gamma (x + k)}{\Gamma (x + 1) \Gamma (k)} \left( \frac{k}{k + \mu} \right)^{k} \left( \frac{\mu}{\mu + k} \right)^{x}
+$$
+and has mean $\mu$ and variance $k^{-1} \mu^{2} + \mu$.  If we instead put this in Gamma-Poisson form with shape = $k$ and scale = $\theta$, then we can write the pmf as follows
+$$
+f_{\text{NB}}(x) = \int_{0}^{\infty} \frac{1}{\Gamma (k) \theta^{k}} \lambda^{k - 1} e^{-\lambda / \theta} \frac{1}{x!} \lambda^{x} e^{- \lambda} d \lambda = \frac{\Gamma(k + x)}{\Gamma(x + 1) \Gamma(k)} \theta^{x} (1 + \theta)^{-x - k}.
+$$
+This parametrization has mean $ k \theta$ and variance $k \theta (\theta + 1)$.
+
+Consider now the log-Normal Poisson distribution.  This has pmf 
+$$
+f_{\text{LNP}} (x) = \int_{0}^{\infty} \frac{1}{\lambda \sqrt{2 \pi \sigma^{2}}} \text{exp} \bigg( - \frac{(\log \lambda - \mu)^2}{2 \sigma^2} \bigg) \frac{1}{x!} \lambda^{x} e^{- \lambda} d \lambda.
+$$
+Sadly, this has no closed form solution so we can't do direct moment matching.  What if we instead match the moments of the compounding distributions, the Gamma and the log-Normal?
+
+The mean of Gamma distribution is $k\theta$ and the variance is $k \theta^{2}$.  We see that the Poissonization adds an extra factor to the mean of $k \theta$.   The log-Normal distribution has mean $\text{exp}( \mu + \sigma^{2} / 2)$ and variance $\left( \text{exp} (\sigma^{2}) - 1 \right) \text{exp} (2 \mu + \sigma^{2})$.  Therefore setting
+$$
+\begin{aligned}
+k \theta &= \text{exp}( \mu + \sigma^{2} / 2) \notag \\
+k \theta^{2} &= \left( \text{exp} (\sigma^{2}) - 1 \right) \text{exp} (2 \mu + \sigma^{2})
+\notag
+\end{aligned}
+$$
+results in 
+$$
+\begin{aligned}
+\theta &= \left( \text{exp} (\sigma^{2}) - 1 \right) \text{exp}( \mu + \sigma^{2} / 2)
+\notag \\
+k &= \left( \text{exp}(\sigma^2) - 1 \right)^{-1}.
+\notag
+\end{aligned}
+$$
+Therefore
+$$
+\begin{aligned}
+\sigma^{2} &= \log \left( \frac{k + 1}{k} \right)
+\notag \\
+\mu &= \log (\theta k) - \frac{1}{2} \log \left( \frac{k + 1}{k} \right).
+\notag 
+\end{aligned}
+$$
+We write the following function to match moments.
+```{r}
+match_mom_nb_2_lnp <- function(m, #mean
+                               size){
+  k = size
+  theta = m/k
+  return(list(sigma = sqrt(log(k + 1) - log(k)),
+              mu = log(theta*k) - (1/2)*(log(k + 1) - log(k))))
+}
+```
